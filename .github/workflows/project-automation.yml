@@ -15,35 +15,37 @@ name: Project Automation
 # │  ✅ Item closed            issue only → Done                       │
 # │  ✅ Item reopened          issue only → Backlog                    │
 # │  ✅ Auto-close issue       when status = Done → closes issue       │
-# │  ❌ PR linked to issue     OFF (linking ≠ ready for review)        │
-# │  ❌ PR merged              OFF (operates on PR, not linked issue)  │
-# │  ❌ Code changes requested OFF (operates on PR, not linked issue)  │
-# │  ❌ Code review approved   OFF (operates on PR, not linked issue)  │
+# │  ❌ All PR-related          OFF (they target PR items, not issues) │
 # │                                                                    │
 # │  This Actions workflow handles everything else:                    │
 # │                                                                    │
-# │  Issue assigned            → In Progress (only from Backlog)       │
-# │  Issue unassigned (none)   → Backlog (only from In Progress)       │
-# │  Issue closed not_planned  → Invalid (overrides built-in Done)     │
-# │  Review requested on PR    → linked issues to In Review            │
-# │  PR converted to draft     → linked issues to In Progress          │
-# │  Changes requested review  → linked issues to In Progress          │
-# │  PR closed without merge   → In Progress (assigned) / Backlog     │
+# │  Issue Events:                                                     │
+# │    assigned              → In Progress (only from Backlog)         │
+# │    unassigned (none left)→ Backlog (only from In Progress)         │
+# │    closed not_planned    → Invalid (overrides built-in Done)       │
 # │                                                                    │
-# │  PR merged → Done is handled by the indirect chain:                │
-# │  merge → GitHub auto-closes linked issue → built-in Item closed    │
+# │  PR Events (affect linked issues):                                 │
+# │    PR opened (draft)     → In Progress (from Backlog)              │
+# │    PR opened (ready)     → In Review (from Backlog/In Progress)    │
+# │    PR ready_for_review   → In Review (from Backlog/In Progress)    │
+# │    review requested      → In Review (from Backlog/In Progress)    │
+# │    converted to draft    → In Progress (from In Review)            │
+# │    changes requested     → In Progress (from In Review)            │
+# │    PR closed (not merged)→ In Progress/Backlog (if no other PRs)   │
+# │    PR merged             → Done (via auto-close → built-in)        │
 # │                                                                    │
-# │  Issue linking uses GitHub's closingIssuesReferences GraphQL API   │
-# │  with regex fallback — catches sidebar links, not just body text.  │
+# │  Guards:                                                           │
+# │    • Never move backwards from Done or Invalid                     │
+# │    • Never move from In Review to In Progress on assign            │
+# │    • Check for competing PRs before moving off In Review           │
+# │    • Uses closingIssuesReferences API + regex fallback             │
 # └─────────────────────────────────────────────────────────────────────┘
 
 on:
   issues:
     types: [assigned, unassigned, closed]
-  # Use pull_request_target (not pull_request) so fork PRs have access
-  # to PROJECT_TOKEN. Safe because we never checkout PR code.
   pull_request_target:
-    types: [closed, review_requested, converted_to_draft]
+    types: [opened, ready_for_review, closed, review_requested, converted_to_draft]
   pull_request_review:
     types: [submitted]
 
@@ -61,29 +63,25 @@ env:
 
 jobs:
   # ─── Issue assigned → In Progress ──────────────────────────────
-  # Only moves from Backlog. Does NOT yank issues backwards from
-  # In Review, Done, or Invalid.
+  # Only from Backlog. Does NOT yank from In Review/Done/Invalid.
+  # Does NOT move from In Progress (already there).
   issue-assigned:
     if: github.event_name == 'issues' && github.event.action == 'assigned'
     runs-on: ubuntu-latest
     steps:
       - name: Move to In Progress if in Backlog
         run: |
-          # Ensure issue is in project
           ITEM_ID=$(gh project item-add $PROJECT_NUMBER \
             --owner $PROJECT_OWNER \
             --url "${{ github.event.issue.html_url }}" \
             --format json | jq -r '.id')
 
-          CURRENT_STATUS=$(gh project item-list $PROJECT_NUMBER \
+          CURRENT=$(gh project item-list $PROJECT_NUMBER \
             --owner $PROJECT_OWNER --limit 200 --format json | \
             jq -r --arg N "${{ github.event.issue.number }}" \
             '.items[] | select(.content.number == ($N|tonumber)) | .status')
 
-          if [ "$CURRENT_STATUS" = "Backlog" ] || \
-             [ "$CURRENT_STATUS" = "" ] || \
-             [ "$CURRENT_STATUS" = "null" ]; then
-
+          if [ "$CURRENT" = "Backlog" ] || [ "$CURRENT" = "" ] || [ "$CURRENT" = "null" ]; then
             gh api graphql -f query="
               mutation {
                 updateProjectV2ItemFieldValue(input: {
@@ -93,42 +91,38 @@ jobs:
                   value: { singleSelectOptionId: \"$STATUS_IN_PROGRESS\" }
                 }) { projectV2Item { id } }
               }"
-            echo "✓ #${{ github.event.issue.number }} → In Progress (was: ${CURRENT_STATUS:-empty})"
+            echo "✓ #${{ github.event.issue.number }} → In Progress (was: ${CURRENT:-empty})"
           else
-            echo "· #${{ github.event.issue.number }} already $CURRENT_STATUS, skipped"
+            echo "· #${{ github.event.issue.number }} is $CURRENT, skipped"
           fi
 
-  # ─── Issue unassigned → Backlog (if no assignees left) ─────────
-  # Only moves from In Progress. Does NOT move issues that are
-  # In Review (PR still open), Done, or Invalid.
+  # ─── Issue unassigned → Backlog (if none left) ─────────────────
+  # Only from In Progress. Does NOT move from In Review/Done/Invalid.
   issue-unassigned:
     if: github.event_name == 'issues' && github.event.action == 'unassigned'
     runs-on: ubuntu-latest
     steps:
-      - name: Move back to Backlog if no assignees and currently In Progress
+      - name: Move to Backlog if no assignees and In Progress
         run: |
-          ASSIGNEE_COUNT=$(gh issue view ${{ github.event.issue.number }} \
+          ASSIGNEES=$(gh issue view ${{ github.event.issue.number }} \
             --repo ${{ github.repository }} --json assignees -q '.assignees | length')
 
-          if [ "$ASSIGNEE_COUNT" -gt 0 ]; then
-            echo "· #${{ github.event.issue.number }} still has $ASSIGNEE_COUNT assignee(s), no change"
+          if [ "$ASSIGNEES" -gt 0 ]; then
+            echo "· Still has $ASSIGNEES assignee(s)"
             exit 0
           fi
 
-          ITEM_DATA=$(gh project item-list $PROJECT_NUMBER \
+          DATA=$(gh project item-list $PROJECT_NUMBER \
             --owner $PROJECT_OWNER --limit 200 --format json | \
             jq -r --arg N "${{ github.event.issue.number }}" \
             '.items[] | select(.content.number == ($N|tonumber)) | "\(.id) \(.status)"')
 
-          ITEM_ID=$(echo "$ITEM_DATA" | awk '{print $1}')
-          CURRENT_STATUS=$(echo "$ITEM_DATA" | cut -d' ' -f2-)
+          ITEM_ID=$(echo "$DATA" | awk '{print $1}')
+          CURRENT=$(echo "$DATA" | cut -d' ' -f2-)
 
-          if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
-            echo "· #${{ github.event.issue.number }} not in project, skipped"
-            exit 0
-          fi
+          [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ] && exit 0
 
-          if [ "$CURRENT_STATUS" = "In Progress" ]; then
+          if [ "$CURRENT" = "In Progress" ]; then
             gh api graphql -f query="
               mutation {
                 updateProjectV2ItemFieldValue(input: {
@@ -140,12 +134,10 @@ jobs:
               }"
             echo "✓ #${{ github.event.issue.number }} → Backlog (unassigned)"
           else
-            echo "· #${{ github.event.issue.number }} is $CURRENT_STATUS, not In Progress, skipped"
+            echo "· #${{ github.event.issue.number }} is $CURRENT, skipped"
           fi
 
-  # ─── Issue closed as "not planned" → Invalid ───────────────────
-  # The built-in "Item closed" sets Done for all closes.
-  # This overrides that for issues closed as "not planned".
+  # ─── Issue closed not_planned → Invalid ────────────────────────
   issue-closed-not-planned:
     if: >-
       github.event_name == 'issues' &&
@@ -155,9 +147,7 @@ jobs:
     steps:
       - name: Override to Invalid
         run: |
-          # Runner startup (~15-30s) gives built-in time to set Done first.
           sleep 3
-
           ITEM_ID=$(gh project item-list $PROJECT_NUMBER \
             --owner $PROJECT_OWNER --limit 200 --format json | \
             jq -r --arg N "${{ github.event.issue.number }}" \
@@ -173,26 +163,27 @@ jobs:
                   value: { singleSelectOptionId: \"$STATUS_INVALID\" }
                 }) { projectV2Item { id } }
               }"
-            echo "✓ #${{ github.event.issue.number }} → Invalid (closed as not planned)"
+            echo "✓ #${{ github.event.issue.number }} → Invalid"
           fi
 
-  # ─── Review requested on PR → linked issues to In Review ──────
-  # Fires when a contributor clicks "Request review" — meaning they
-  # consider the work done. Draft PRs or just opening a PR does NOT
-  # trigger this.
-  review-requested:
+  # ─── PR opened → In Progress or In Review ─────────────────────
+  # Someone opens a PR linking to an issue. This means they're
+  # actively working on it.
+  #   Draft PR → issue to In Progress (still coding)
+  #   Ready PR → issue to In Review (awaiting review)
+  # Only moves forward from Backlog or In Progress. Never backward.
+  pr-opened:
     if: >-
       github.event_name == 'pull_request_target' &&
-      github.event.action == 'review_requested'
+      github.event.action == 'opened'
     runs-on: ubuntu-latest
     steps:
-      - name: Move linked issues to In Review
+      - name: Move linked issues based on PR draft state
         env:
           PR_NUM: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
         run: |
-          # Use GitHub's closingIssuesReferences API (catches sidebar links
-          # AND body keywords). Fall back to regex if API returns nothing.
           OWNER="${REPO%/*}"
           NAME="${REPO#*/}"
 
@@ -204,10 +195,9 @@ jobs:
                     nodes { number }
                   }
                 }
-              } 
+              }
             }" -q '.data.repository.pullRequest.closingIssuesReferences.nodes[].number' 2>/dev/null)
 
-          # Fallback to regex if API returned nothing
           if [ -z "$ISSUE_NUMS" ]; then
             PR_BODY=$(gh pr view "$PR_NUM" --repo "$REPO" --json body -q '.body')
             ISSUE_NUMS=$(echo "$PR_BODY" | \
@@ -215,52 +205,63 @@ jobs:
               grep -oE '[0-9]+' || true)
           fi
 
-          if [ -z "$ISSUE_NUMS" ]; then
-            echo "· PR #$PR_NUM has no linked issues"
-            exit 0
+          [ -z "$ISSUE_NUMS" ] && echo "· No linked issues" && exit 0
+
+          if [ "$IS_DRAFT" = "true" ]; then
+            TARGET="$STATUS_IN_PROGRESS"
+            TARGET_NAME="In Progress"
+            ALLOWED="Backlog"
+          else
+            TARGET="$STATUS_IN_REVIEW"
+            TARGET_NAME="In Review"
+            ALLOWED="Backlog In Progress"
           fi
 
           for NUM in $ISSUE_NUMS; do
-            ITEM_DATA=$(gh project item-list $PROJECT_NUMBER \
+            DATA=$(gh project item-list $PROJECT_NUMBER \
               --owner $PROJECT_OWNER --limit 200 --format json | \
               jq -r --arg N "$NUM" \
               '.items[] | select(.content.number == ($N|tonumber)) | "\(.id) \(.status)"')
 
-            ITEM_ID=$(echo "$ITEM_DATA" | awk '{print $1}')
-            CURRENT_STATUS=$(echo "$ITEM_DATA" | cut -d' ' -f2-)
+            ITEM_ID=$(echo "$DATA" | awk '{print $1}')
+            CURRENT=$(echo "$DATA" | cut -d' ' -f2-)
 
-            if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
-              continue
+            [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ] && continue
+
+            # Check if current status is in the allowed list
+            MOVE=false
+            for A in $ALLOWED; do
+              [ "$CURRENT" = "$A" ] && MOVE=true
+            done
+            [ "$CURRENT" = "" ] || [ "$CURRENT" = "null" ] && MOVE=true
+
+            if [ "$MOVE" = "true" ]; then
+              gh api graphql -f query="
+                mutation {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: \"$PROJECT_ID\"
+                    itemId: \"$ITEM_ID\"
+                    fieldId: \"$STATUS_FIELD_ID\"
+                    value: { singleSelectOptionId: \"$TARGET\" }
+                  }) { projectV2Item { id } }
+                }"
+              echo "✓ #$NUM → $TARGET_NAME (PR #$PR_NUM opened, was: $CURRENT)"
+            else
+              echo "· #$NUM is $CURRENT, skipped"
             fi
-
-            # Don't override terminal states
-            if [ "$CURRENT_STATUS" = "Done" ] || [ "$CURRENT_STATUS" = "Invalid" ]; then
-              echo "· #$NUM is $CURRENT_STATUS, skipped"
-              continue
-            fi
-
-            gh api graphql -f query="
-              mutation {
-                updateProjectV2ItemFieldValue(input: {
-                  projectId: \"$PROJECT_ID\"
-                  itemId: \"$ITEM_ID\"
-                  fieldId: \"$STATUS_FIELD_ID\"
-                  value: { singleSelectOptionId: \"$STATUS_IN_REVIEW\" }
-                }) { projectV2Item { id } }
-              }"
-            echo "✓ #$NUM → In Review (review requested on PR #$PR_NUM)"
           done
 
-  # ─── PR converted to draft → linked issues back to In Progress ─
-  # Contributor realizes PR isn't ready and converts to draft.
-  # Issue should go back to In Progress (they're still working).
-  converted-to-draft:
+  # ─── PR ready for review → In Review ──────────────────────────
+  # Fires when: draft → ready, OR review explicitly requested.
+  # Both mean "please look at this" — issue should be In Review.
+  # Only moves from Backlog or In Progress. Never backward.
+  pr-ready-for-review:
     if: >-
       github.event_name == 'pull_request_target' &&
-      github.event.action == 'converted_to_draft'
+      (github.event.action == 'ready_for_review' || github.event.action == 'review_requested')
     runs-on: ubuntu-latest
     steps:
-      - name: Move linked issues back to In Progress
+      - name: Move linked issues to In Review
         env:
           PR_NUM: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
@@ -286,26 +287,85 @@ jobs:
               grep -oE '[0-9]+' || true)
           fi
 
-          if [ -z "$ISSUE_NUMS" ]; then
-            echo "· PR #$PR_NUM has no linked issues"
-            exit 0
-          fi
+          [ -z "$ISSUE_NUMS" ] && echo "· No linked issues" && exit 0
 
           for NUM in $ISSUE_NUMS; do
-            ITEM_DATA=$(gh project item-list $PROJECT_NUMBER \
+            DATA=$(gh project item-list $PROJECT_NUMBER \
               --owner $PROJECT_OWNER --limit 200 --format json | \
               jq -r --arg N "$NUM" \
               '.items[] | select(.content.number == ($N|tonumber)) | "\(.id) \(.status)"')
 
-            ITEM_ID=$(echo "$ITEM_DATA" | awk '{print $1}')
-            CURRENT_STATUS=$(echo "$ITEM_DATA" | cut -d' ' -f2-)
+            ITEM_ID=$(echo "$DATA" | awk '{print $1}')
+            CURRENT=$(echo "$DATA" | cut -d' ' -f2-)
 
-            if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
-              continue
+            [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ] && continue
+
+            # Only move forward from Backlog or In Progress
+            if [ "$CURRENT" = "Backlog" ] || [ "$CURRENT" = "In Progress" ] || \
+               [ "$CURRENT" = "" ] || [ "$CURRENT" = "null" ]; then
+              gh api graphql -f query="
+                mutation {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: \"$PROJECT_ID\"
+                    itemId: \"$ITEM_ID\"
+                    fieldId: \"$STATUS_FIELD_ID\"
+                    value: { singleSelectOptionId: \"$STATUS_IN_REVIEW\" }
+                  }) { projectV2Item { id } }
+                }"
+              echo "✓ #$NUM → In Review (PR #$PR_NUM ready, was: $CURRENT)"
+            else
+              echo "· #$NUM is $CURRENT, skipped"
             fi
+          done
 
-            # Only move from In Review back to In Progress
-            if [ "$CURRENT_STATUS" = "In Review" ]; then
+  # ─── PR converted to draft → In Progress ──────────────────────
+  # Contributor realized it's not ready. Back to work.
+  converted-to-draft:
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      github.event.action == 'converted_to_draft'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Move linked issues to In Progress
+        env:
+          PR_NUM: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          OWNER="${REPO%/*}"
+          NAME="${REPO#*/}"
+
+          ISSUE_NUMS=$(gh api graphql -f query="
+            query {
+              repository(owner: \"$OWNER\", name: \"$NAME\") {
+                pullRequest(number: $PR_NUM) {
+                  closingIssuesReferences(first: 10) {
+                    nodes { number }
+                  }
+                }
+              }
+            }" -q '.data.repository.pullRequest.closingIssuesReferences.nodes[].number' 2>/dev/null)
+
+          if [ -z "$ISSUE_NUMS" ]; then
+            PR_BODY=$(gh pr view "$PR_NUM" --repo "$REPO" --json body -q '.body')
+            ISSUE_NUMS=$(echo "$PR_BODY" | \
+              grep -oiE '(close[sd]?|fix(e[sd])?|resolve[sd]?)\s+#[0-9]+' | \
+              grep -oE '[0-9]+' || true)
+          fi
+
+          [ -z "$ISSUE_NUMS" ] && echo "· No linked issues" && exit 0
+
+          for NUM in $ISSUE_NUMS; do
+            DATA=$(gh project item-list $PROJECT_NUMBER \
+              --owner $PROJECT_OWNER --limit 200 --format json | \
+              jq -r --arg N "$NUM" \
+              '.items[] | select(.content.number == ($N|tonumber)) | "\(.id) \(.status)"')
+
+            ITEM_ID=$(echo "$DATA" | awk '{print $1}')
+            CURRENT=$(echo "$DATA" | cut -d' ' -f2-)
+
+            [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ] && continue
+
+            if [ "$CURRENT" = "In Review" ]; then
               gh api graphql -f query="
                 mutation {
                   updateProjectV2ItemFieldValue(input: {
@@ -315,23 +375,22 @@ jobs:
                     value: { singleSelectOptionId: \"$STATUS_IN_PROGRESS\" }
                   }) { projectV2Item { id } }
                 }"
-              echo "✓ #$NUM → In Progress (PR #$PR_NUM converted to draft)"
+              echo "✓ #$NUM → In Progress (PR #$PR_NUM → draft)"
             else
-              echo "· #$NUM is $CURRENT_STATUS, not In Review, skipped"
+              echo "· #$NUM is $CURRENT, skipped"
             fi
           done
 
-  # ─── Changes requested on review → linked issues to In Progress ─
-  # Only moves if no OTHER open PR for the same issue is still in a
-  # review-requested state. Prevents bouncing issues when multiple
-  # contributors work on competing approaches.
+  # ─── Changes requested → In Progress ──────────────────────────
+  # Reviewer says "not ready". Only from In Review, and only if
+  # no OTHER open non-draft PR for the same issue is still in review.
   changes-requested:
     if: >-
       github.event_name == 'pull_request_review' &&
       github.event.review.state == 'changes_requested'
     runs-on: ubuntu-latest
     steps:
-      - name: Move linked issues to In Progress if no other PRs in review
+      - name: Move linked issues to In Progress if no other PRs awaiting review
         env:
           PR_NUM: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
@@ -357,36 +416,27 @@ jobs:
               grep -oE '[0-9]+' || true)
           fi
 
-          if [ -z "$ISSUE_NUMS" ]; then
-            echo "· PR #$PR_NUM has no linked issues"
-            exit 0
-          fi
+          [ -z "$ISSUE_NUMS" ] && echo "· No linked issues" && exit 0
 
           for NUM in $ISSUE_NUMS; do
-            ITEM_DATA=$(gh project item-list $PROJECT_NUMBER \
+            DATA=$(gh project item-list $PROJECT_NUMBER \
               --owner $PROJECT_OWNER --limit 200 --format json | \
               jq -r --arg N "$NUM" \
               '.items[] | select(.content.number == ($N|tonumber)) | "\(.id) \(.status)"')
 
-            ITEM_ID=$(echo "$ITEM_DATA" | awk '{print $1}')
-            CURRENT_STATUS=$(echo "$ITEM_DATA" | cut -d' ' -f2-)
+            ITEM_ID=$(echo "$DATA" | awk '{print $1}')
+            CURRENT=$(echo "$DATA" | cut -d' ' -f2-)
 
-            if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
-              continue
-            fi
+            [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ] && continue
+            [ "$CURRENT" != "In Review" ] && echo "· #$NUM is $CURRENT, skipped" && continue
 
-            if [ "$CURRENT_STATUS" != "In Review" ]; then
-              echo "· #$NUM is $CURRENT_STATUS, not In Review, skipped"
-              continue
-            fi
+            # Check for OTHER open non-draft PRs linking to this issue
+            OTHER=$(gh pr list --repo "$REPO" --state open \
+              --json number,body,isDraft -q \
+              "[.[] | select(.number != $PR_NUM) | select(.isDraft == false) | select(.body | test(\"(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\\\s+#$NUM\"))] | length" 2>/dev/null || echo "0")
 
-            # Check if OTHER open PRs also link to this issue
-            OTHER_PRS=$(gh pr list --repo "$REPO" --state open \
-              --json number,body -q \
-              "[.[] | select(.number != $PR_NUM) | select(.body | test(\"(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\\\s+#$NUM\"))] | length" 2>/dev/null || echo "0")
-
-            if [ "$OTHER_PRS" -gt 0 ] 2>/dev/null; then
-              echo "· #$NUM has $OTHER_PRS other open PR(s), staying In Review"
+            if [ "$OTHER" -gt 0 ] 2>/dev/null; then
+              echo "· #$NUM has $OTHER other ready PR(s), staying In Review"
               continue
             fi
 
@@ -403,8 +453,7 @@ jobs:
           done
 
   # ─── PR closed without merge → In Progress or Backlog ──────────
-  # Checks for OTHER open PRs linked to the same issue first.
-  # If another PR is still open, the issue stays In Review.
+  # If other open non-draft PRs exist → stay In Review.
   # Otherwise: In Progress if assigned, Backlog if not.
   pr-closed-not-merged:
     if: >-
@@ -439,50 +488,45 @@ jobs:
               grep -oE '[0-9]+' || true)
           fi
 
-          if [ -z "$ISSUE_NUMS" ]; then
-            echo "· PR #$PR_NUM has no linked issues"
-            exit 0
-          fi
+          [ -z "$ISSUE_NUMS" ] && echo "· No linked issues" && exit 0
 
           for NUM in $ISSUE_NUMS; do
-            ITEM_DATA=$(gh project item-list $PROJECT_NUMBER \
+            DATA=$(gh project item-list $PROJECT_NUMBER \
               --owner $PROJECT_OWNER --limit 200 --format json | \
               jq -r --arg N "$NUM" \
               '.items[] | select(.content.number == ($N|tonumber)) | "\(.id) \(.status)"')
 
-            ITEM_ID=$(echo "$ITEM_DATA" | awk '{print $1}')
-            CURRENT_STATUS=$(echo "$ITEM_DATA" | cut -d' ' -f2-)
+            ITEM_ID=$(echo "$DATA" | awk '{print $1}')
+            CURRENT=$(echo "$DATA" | cut -d' ' -f2-)
 
-            if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
-              continue
-            fi
+            [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ] && continue
 
             # Don't touch terminal states
-            if [ "$CURRENT_STATUS" = "Done" ] || [ "$CURRENT_STATUS" = "Invalid" ]; then
-              echo "· #$NUM is $CURRENT_STATUS, skipped"
+            if [ "$CURRENT" = "Done" ] || [ "$CURRENT" = "Invalid" ]; then
+              echo "· #$NUM is $CURRENT, skipped"
               continue
             fi
 
-            # Check for other open PRs linking to this issue
-            OTHER_PRS=$(gh pr list --repo "$REPO" --state open \
-              --json number,body -q \
-              "[.[] | select(.number != $PR_NUM) | select(.body | test(\"(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\\\s+#$NUM\"))] | length" 2>/dev/null || echo "0")
+            # Check for other open non-draft PRs
+            OTHER=$(gh pr list --repo "$REPO" --state open \
+              --json number,body,isDraft -q \
+              "[.[] | select(.number != $PR_NUM) | select(.isDraft == false) | select(.body | test(\"(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\\\s+#$NUM\"))] | length" 2>/dev/null || echo "0")
 
-            if [ "$OTHER_PRS" -gt 0 ] 2>/dev/null; then
-              echo "· #$NUM has $OTHER_PRS other open PR(s), staying In Review"
+            if [ "$OTHER" -gt 0 ] 2>/dev/null; then
+              echo "· #$NUM has $OTHER other ready PR(s), staying In Review"
               continue
             fi
 
-            # No other PRs — decide based on assignment
-            ASSIGNEE_COUNT=$(gh issue view "$NUM" \
+            # No other PRs — check assignment
+            ASSIGNEES=$(gh issue view "$NUM" \
               --repo "$REPO" --json assignees -q '.assignees | length')
 
-            if [ "$ASSIGNEE_COUNT" -gt 0 ]; then
+            if [ "$ASSIGNEES" -gt 0 ]; then
               TARGET="$STATUS_IN_PROGRESS"
-              TARGET_NAME="In Progress"
+              NAME="In Progress"
             else
               TARGET="$STATUS_BACKLOG"
-              TARGET_NAME="Backlog"
+              NAME="Backlog"
             fi
 
             gh api graphql -f query="
@@ -494,5 +538,5 @@ jobs:
                   value: { singleSelectOptionId: \"$TARGET\" }
                 }) { projectV2Item { id } }
               }"
-            echo "✓ #$NUM → $TARGET_NAME (PR #$PR_NUM closed, assignees: $ASSIGNEE_COUNT)"
+            echo "✓ #$NUM → $NAME (PR #$PR_NUM closed)"
           done
