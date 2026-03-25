@@ -5,9 +5,10 @@ import { Dashboard } from "@/pages/dashboard"
 import { QuestView } from "@/pages/quest"
 import { Profile } from "@/pages/profile"
 import { NotFound } from "@/pages/not-found"
+import { CreateQuest } from "@/pages/create-quest"
 
-const VALID_PAGES = ["landing", "dashboard", "profile"] as const
-type Page = (typeof VALID_PAGES)[number] | "quest" | "404"
+const VALID_PAGES = ["landing", "dashboard", "profile", "create-quest"] as const
+type Page = (typeof VALID_PAGES)[number] | "workspace" | "404"
 
 interface AppState {
   page: Page
@@ -17,9 +18,10 @@ interface AppState {
 function pathToPage(pathname: string): { page: Page; questId: number | null } {
   const clean = pathname === "" ? "/" : pathname
 
-  if (clean === "/") return { page: "landing", questId: null }
-  if (clean === "/dashboard") return { page: "dashboard", questId: null }
-  if (clean === "/profile") return { page: "profile", questId: null }
+  if (clean === "/") return { page: "landing", workspaceId: null }
+  if (clean === "/dashboard") return { page: "dashboard", workspaceId: null }
+  if (clean === "/profile") return { page: "profile", workspaceId: null }
+  if (clean === "/create-quest") return { page: "create-quest", workspaceId: null }
 
   const qMatch = clean.match(/^\/quest\/(\d+)$/)
   if (qMatch) return { page: "quest", questId: Number(qMatch[1]) }
@@ -73,7 +75,14 @@ export default function App() {
       case "dashboard":
         return (
           <Dashboard
-            onSelectQuest={handleSelectQuest}
+            onSelectWorkspace={handleSelectWorkspace}
+            onCreateQuest={() => handleNavigate("create-quest")}
+          />
+        )
+      case "create-quest":
+        return (
+          <CreateQuest
+            onBack={() => handleNavigate("dashboard")}
           />
         )
       case "profile":

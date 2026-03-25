@@ -23,19 +23,12 @@ import { milestoneClient } from "@/lib/contracts/milestone"
 import { rewardsClient } from "@/lib/contracts/rewards"
 
 interface DashboardProps {
-  onSelectQuest: (id: number) => void
+  onSelectWorkspace: (id: number) => void
+  onCreateQuest: () => void
 }
 
-interface QuestWithStats extends QuestInfo {
-  enrolleeCount: number
-  milestoneCount: number
-  poolBalance: bigint
-  completedCount: number
-  isOwned: boolean
-}
-
-export function Dashboard({ onSelectQuest }: DashboardProps) {
-  const { connected, connect, shortAddress, address } = useWallet()
+export function Dashboard({ onSelectWorkspace, onCreateQuest }: DashboardProps) {
+  const { connected, connect, shortAddress } = useWallet()
   const [filter, setFilter] = useState<"all" | "owned" | "enrolled">("all")
   const [quests, setQuests] = useState<QuestWithStats[]>([])
   const [totalEarnings, setTotalEarnings] = useState<bigint>(0n)
@@ -159,6 +152,7 @@ export function Dashboard({ onSelectQuest }: DashboardProps) {
           </div>
           <Button
             variant="secondary"
+            onClick={onCreateQuest}
             className="shimmer-on-hover group flex-shrink-0"
             onClick={() => {}}
           >
@@ -265,19 +259,30 @@ export function Dashboard({ onSelectQuest }: DashboardProps) {
             </Card>
           ))}
 
-          {filteredQuests.length === 0 && (
-            <Card className="animate-fade-in-up border-black border-2">
-              <CardContent className="flex flex-col items-center justify-center py-16 text-center">
-                <div className="w-16 h-16 bg-primary border-[3px] border-black shadow-[4px_4px_0_#000] flex items-center justify-center mb-6">
-                  <Search className="h-6 w-6" />
-                </div>
-                <h3 className="font-black text-lg mb-2">
-                  {filter === "all" ? "No quests yet" : `No ${filter} quests`}
-                </h3>
-              </CardContent>
-            </Card>
-          )}
-        </div>
+      {filteredWorkspaces.length === 0 && (
+        <Card className="animate-fade-in-up">
+          <CardContent className="flex flex-col items-center justify-center py-16 text-center">
+            <div className="w-16 h-16 bg-primary border-[3px] border-black shadow-[4px_4px_0_#000] flex items-center justify-center mb-6">
+              <Search className="h-6 w-6" />
+            </div>
+            <h3 className="font-black text-lg mb-2">
+              {filter === "all" ? "No quests yet" : `No ${filter} quests`}
+            </h3>
+            <p className="text-sm text-muted-foreground mb-6 max-w-sm">
+              {filter === "all"
+                ? "Create your first quest to start incentivizing learning with on-chain rewards."
+                : filter === "owned"
+                  ? "You haven't created any quests yet. Start one to incentivize learners."
+                  : "You haven't enrolled in any quests yet. Browse available quests to get started."}
+            </p>
+            {filter === "all" || filter === "owned" ? (
+              <Button onClick={onCreateQuest} className="shimmer-on-hover">
+                <Plus className="h-4 w-4" />
+                Create Quest
+              </Button>
+            ) : null}
+          </CardContent>
+        </Card>
       )}
     </div>
   )
