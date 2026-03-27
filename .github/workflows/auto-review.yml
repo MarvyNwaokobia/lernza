@@ -249,7 +249,17 @@ jobs:
           PR_NUM: ${{ steps.pr.outputs.number }}
           PR_TITLE: ${{ steps.diff.outputs.title }}
         run: |
+          # Collect existing commit bodies, strip any AI/bot co-author lines
+          COMMIT_BODY=$(gh pr view "$PR_NUM" --json commits \
+            --jq '[.commits[].messageBody] | join("\n")' \
+            | grep -viE 'co-authored-by:.*(claude|qwen|copilot|github-actions|bot|\[bot\]|gpt|openai|anthropic)' \
+            || true)
+
+          # Always add the human co-author
+          MERGE_BODY=$(printf '%s\n\nCo-authored-by: Dopey <hello@sshdopey.com>' "$COMMIT_BODY" \
+            | sed '/^$/N;/^\n$/d')
+
           gh pr merge "$PR_NUM" \
             --squash \
             --subject "$PR_TITLE" \
-            --body "Co-authored-by: Dopey <hello@sshdopey.com>"
+            --body "$MERGE_BODY"
