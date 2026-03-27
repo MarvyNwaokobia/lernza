@@ -208,58 +208,62 @@ export function QuestView() {
 
   // Refetch function that refreshes all data
 
+  // Completions data - needs to be fetched separately since it depends on both milestones and enrollees
+  const [completions, setCompletions] = useState<CompletionRecord[]>(EMPTY_COMPLETIONS)
+
+  // Fetch completions when milestones and enrollees are available
+  const fetchCompletions = useCallback(async () => {
+    if (milestonesData.data && enrolleesData.data) {
+      try {
+        const ms = milestonesData.data
+        const en = enrolleesData.data
+        const completionEntries = await Promise.all(
+          en.flatMap(enrollee =>
+            ms.map(async milestone => {
+              const completed = await milestoneClient.isCompleted(questId, milestone.id, enrollee)
+              return completed
+                ? ({
+                    milestoneId: milestone.id,
+                    enrollee,
+                    completed: true,
+                  } satisfies CompletionRecord)
+                : null
+            })
+          )
+        )
+
+        const filteredCompletions = completionEntries.filter(
+          (entry): entry is CompletionRecord => entry !== null
+        )
+        setCompletions(filteredCompletions)
+      } catch (error) {
+        console.error("Failed to fetch completions:", error)
+      }
+    } else {
+      setCompletions(EMPTY_COMPLETIONS)
+    }
+  }, [questId, milestonesData.data, enrolleesData.data])
+
+  useEffect(() => {
+    fetchCompletions()
+  }, [fetchCompletions])
+
+  // Refetch function that refreshes all data
   const refetch = useCallback(async () => {
     await Promise.all([
       questData.refetch(),
       milestonesData.refetch(),
       enrolleesData.refetch(),
       poolBalanceData.refetch(),
+      fetchCompletions(),
     ])
-  }, [questData, milestonesData, enrolleesData, poolBalanceData])
+  }, [questData, milestonesData, enrolleesData, poolBalanceData, fetchCompletions])
 
   // Get raw data
   const quest = questData.data
   const milestones = milestonesData.data ?? EMPTY_MILESTONES
   const enrollees = enrolleesData.data ?? EMPTY_ENROLLEES
   const poolBalance = poolBalanceData.data ?? BigInt(0)
-
-  // Completions data - needs to be fetched separately since it depends on both milestones and enrollees
-  const [completions, setCompletions] = useState<CompletionRecord[]>(EMPTY_COMPLETIONS)
-
-  // Fetch completions when milestones and enrollees are available
-  useEffect(() => {
-    const fetchCompletions = async () => {
-      if (milestones.length > 0 && enrollees.length > 0) {
-        try {
-          const completionEntries = await Promise.all(
-            enrollees.flatMap(enrollee =>
-              milestones.map(async milestone => {
-                const completed = await milestoneClient.isCompleted(questId, milestone.id, enrollee)
-                return completed
-                  ? ({
-                      milestoneId: milestone.id,
-                      enrollee,
-                      completed: true,
-                    } satisfies CompletionRecord)
-                  : null
-              })
-            )
-          )
-
-          const filteredCompletions = completionEntries.filter(
-            (entry): entry is CompletionRecord => entry !== null
-          )
-          setCompletions(filteredCompletions)
-        } catch (error) {
-          console.error("Failed to fetch completions:", error)
-        }
-      } else {
-        setCompletions(EMPTY_COMPLETIONS)
-      }
-    }
-
-    fetchCompletions()
-  }, [questId, milestones, enrollees])
 
   const isOwner = !!address && quest?.owner === address
   const isEnrolled = !!address && enrollees.includes(address)
@@ -587,7 +591,7 @@ export function QuestView() {
         execute: async () => {
           setActiveMilestoneTxId(milestone.id)
           try {
-            await verifyPayoutTx.run(async () => {
+            const result = await verifyPayoutTx.run(async () => {
               const verifyResult = await milestoneClient.verifyCompletion(
                 address,
                 questId,
@@ -612,11 +616,14 @@ export function QuestView() {
                 throw new Error(payoutResult.error ?? "Reward distribution failed.")
               }
 
-              return payoutResult
+              return { ...payoutResult, payoutAmount }
             })
 
             await refetch()
-            addToast("Completion verified and reward paid out.", "success")
+            addToast(
+              `Completion verified! ${formatTokens(toSafeNumber(result.payoutAmount))} USDC paid out to learner.`,
+              "success"
+            )
           } catch (err: unknown) {
             const message = err instanceof Error ? err.message : "Verification failed."
             addToast(message, "error")
