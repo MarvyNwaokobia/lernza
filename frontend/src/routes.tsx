@@ -1,10 +1,4 @@
-/* eslint-disable react-refresh/only-export-components --
-   This module is the routing manifest: by design it exports both the
-   `router` instance and the lazy() page wrappers it composes. Splitting
-   each lazy() into its own file would scatter the routing graph for zero
-   runtime benefit. Fast Refresh works fine in practice; only the HMR
-   linter complains. */
-import { lazy, Suspense, type ReactNode } from "react"
+import { Suspense, type ReactNode } from "react"
 import { createBrowserRouter } from "react-router-dom"
 import { AppShell } from "@/components/app-shell"
 import { WalletRequiredRoute } from "@/components/wallet-required-route"
@@ -12,46 +6,21 @@ import { PageSkeleton } from "@/components/page-skeleton"
 import { QuestRedirect } from "@/components/workspace-redirect"
 import { ErrorBoundary } from "@/components/error-boundary"
 
-const Landing = lazy(() =>
-  import(/* @vite-chunk-include, webpackChunkName: "page-landing" */ "./pages/landing").then(
-    module => ({ default: module.Landing })
-  )
-)
-const Dashboard = lazy(() =>
-  import(/* @vite-chunk-include, webpackChunkName: "page-dashboard" */ "./pages/dashboard").then(
-    module => ({ default: module.Dashboard })
-  )
-)
-const QuestView = lazy(() =>
-  import(/* @vite-chunk-include, webpackChunkName: "page-quest" */ "./pages/quest").then(
-    module => ({ default: module.QuestView })
-  )
-)
-const Profile = lazy(() =>
-  import(/* @vite-chunk-include, webpackChunkName: "page-profile" */ "./pages/profile").then(
-    module => ({ default: module.Profile })
-  )
-)
-const NotFound = lazy(() =>
-  import(/* @vite-chunk-include, webpackChunkName: "page-not-found" */ "./pages/not-found").then(
-    module => ({ default: module.NotFound })
-  )
-)
-const CreateQuest = lazy(() =>
-  import(
-    /* @vite-chunk-include, webpackChunkName: "page-create-quest" */ "./pages/create-quest"
-  ).then(module => ({ default: module.CreateQuest }))
-)
-const Leaderboard = lazy(() =>
-  import(
-    /* @vite-chunk-include, webpackChunkName: "page-leaderboard" */ "./pages/leaderboard"
-  ).then(module => ({ default: module.Leaderboard }))
-)
-const CreatorProfile = lazy(() =>
-  import(/* @vite-chunk-include, webpackChunkName: "page-creator" */ "./pages/creator").then(
-    module => ({ default: module.CreatorProfile })
-  )
-)
+// Static page imports. We previously used React.lazy() with dynamic imports
+// here so each page would code-split into its own chunk, but Vite 8 / Rolldown
+// emits those dynamic imports as literal runtime fetches against the asset
+// folder without ever emitting a matching chunk file (e.g. /assets/pages/landing
+// 404s in production). Until that toolchain bug is resolved, ship one bundle
+// so navigation actually works. Bundle size is unchanged — Rolldown was
+// inlining all routes into the main chunk anyway.
+import { Landing } from "./pages/landing"
+import { Dashboard } from "./pages/dashboard"
+import { QuestView } from "./pages/quest"
+import { Profile } from "./pages/profile"
+import { NotFound } from "./pages/not-found"
+import { CreateQuest } from "./pages/create-quest"
+import { Leaderboard } from "./pages/leaderboard"
+import { CreatorProfile } from "./pages/creator"
 
 function RouteShell({ children, label }: { children: ReactNode; label: string }) {
   return (

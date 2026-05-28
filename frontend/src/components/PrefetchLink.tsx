@@ -1,42 +1,26 @@
-import { Link, type LinkProps } from "react-router-dom";
-import type { ReactNode } from "react";
+import { Link, type LinkProps } from "react-router-dom"
+import type { ReactNode } from "react"
 
 interface PrefetchLinkProps extends LinkProps {
-  to: string;
-  children: ReactNode;
+  to: string
+  children: ReactNode
 }
 
 /**
- * A wrapper around react-router-dom Link that prefetches the page component on hover.
+ * Thin wrapper around react-router-dom's <Link>. Historically this hooked the
+ * onMouseEnter handler to call `import(\`../pages${path}\`)` and warm up the
+ * lazy route chunk, but Vite 8 / Rolldown can't statically analyze a template
+ * literal import — it leaves the call as a runtime fetch that 404s in
+ * production. With routing now bundled as a single chunk (see routes.tsx),
+ * there's nothing to prefetch, so this component just renders a Link.
+ *
+ * Kept as a separate component so existing call sites don't have to change
+ * when we restore real route-level code splitting and prefetching.
  */
 export function PrefetchLink({ to, children, ...props }: PrefetchLinkProps) {
-  const handleHover = () => {
-    // Simple prefetch logic: dynamically import the page component.
-    // This assumes the route path 'to' maps directly to a file in '../pages'.
-    // e.g. /dashboard -> ../pages/dashboard.tsx
-    
-    // We try to normalize the path to match the page file structure
-    // This is a simple implementation as requested.
-    const pagePath = to.split('?')[0].split('#')[0];
-    
-    // Only prefetch if it's an internal link starting with /
-    if (pagePath.startsWith('/')) {
-      // Note: Vite requires dynamic imports to be relatively predictable
-      // The user's requested pattern: import(`../pages${to}`)
-      try {
-        import(`../pages${pagePath}.tsx`).catch(() => {
-          // If .tsx fails, try without extension (for directories with index.tsx or just .ts)
-          import(`../pages${pagePath}`).catch(() => {});
-        });
-      } catch {
-        // Ignore prefetch errors
-      }
-    }
-  };
-
   return (
-    <Link to={to} onMouseEnter={handleHover} {...props}>
+    <Link to={to} {...props}>
       {children}
     </Link>
-  );
+  )
 }
