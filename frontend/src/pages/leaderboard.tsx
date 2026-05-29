@@ -153,20 +153,26 @@ export function Leaderboard() {
     return () => observer.disconnect()
   }, [activeTab, isLoadingMore, loadMoreEarners, loadMoreQuests])
 
-  const refetchActive = useCallback(() => {
-    if (activeTab === "earners") return refetchEarners()
-    return refetchQuests()
-  }, [activeTab, refetchEarners, refetchQuests])
+   const refetchActive = useCallback(() => {
+     if (activeTab === "earners") return refetchEarners()
+     return refetchQuests()
+   }, [activeTab, refetchEarners, refetchQuests])
 
-  useEffect(() => {
-    const id = setInterval(
-      () => {
-        void refetchActive()
-      },
-      5 * 60 * 1000
-    )
-    return () => clearInterval(id)
-  }, [refetchActive])
+   // Use a ref to store the latest refetchActive to prevent interval leaks
+   const refetchActiveRef = useRef(refetchActive)
+   useEffect(() => {
+     refetchActiveRef.current = refetchActive
+   }, [refetchActive])
+
+   useEffect(() => {
+     const id = setInterval(
+       () => {
+         void refetchActiveRef.current()
+       },
+       5 * 60 * 1000
+     )
+     return () => clearInterval(id)
+   }, [])
 
   const isLoading = activeTab === "earners" ? earnersLoading : questsLoading
   const error = activeTab === "earners" ? earnersError : questsError

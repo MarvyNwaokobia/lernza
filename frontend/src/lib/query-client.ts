@@ -4,7 +4,7 @@ export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: 30_000,
-      gcTime: 5 * 60_000,
+      gcTime: 30 * 60_000, // 30 min — prevents cache eviction on short navigation breaks
       retry: 1,
       refetchOnWindowFocus: false,
     },
