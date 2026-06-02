@@ -1,5 +1,6 @@
 import { rpc, Transaction } from "@stellar/stellar-sdk"
 import { signTransaction, getNetworkDetails } from "@stellar/freighter-api"
+import { trackTransaction, type HorizonTransactionMeta } from "./tx-tracker"
 
 export const SOROBAN_RPC_URL =
   import.meta.env.VITE_SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org"
@@ -13,6 +14,7 @@ export interface TransactionResult {
   txHash: string
   resultXdr?: string
   error?: string
+  horizonMeta?: HorizonTransactionMeta
 }
 
 /**
@@ -60,10 +62,12 @@ export async function signAndSubmit(tx: Transaction): Promise<TransactionResult>
 
         if (pollResponse.status === "SUCCESS") {
           const successResp = pollResponse as rpc.Api.GetSuccessfulTransactionResponse
+          const horizonMeta = await trackTransaction(submitResponse.hash)
           return {
             status: "SUCCESS",
             txHash: submitResponse.hash,
             resultXdr: successResp.returnValue?.toXDR("base64"),
+            horizonMeta: horizonMeta ?? undefined,
           }
         } else {
           return {
